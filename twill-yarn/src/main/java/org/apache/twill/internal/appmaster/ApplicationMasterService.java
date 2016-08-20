@@ -88,8 +88,8 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.Reader;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -97,7 +97,6 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -130,7 +129,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
 
   private volatile boolean stopped;
   private Queue<RunnableContainerRequest> runnableContainerRequests;
-  private Set<String> restartingRunnables; // Contains set of runnables that are being restarted
   private ExecutorService instanceChangeExecutor;
 
   public ApplicationMasterService(RunId runId, ZKClient zkClient, File twillSpecFile,
@@ -155,7 +153,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
     expectedContainers = initExpectedContainers(twillSpec);
     runningContainers = initRunningContainers(amClient.getContainerId(), amClient.getHost());
     eventHandler = createEventHandler(twillSpec);
-    restartingRunnables = new ConcurrentSkipListSet<>();
   }
 
   private JvmOptions loadJvmOptions() throws IOException {
@@ -387,13 +384,13 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
       amClient.allocate(0.0f, allocateHandler);
 
       // Looks for containers requests.
-      if (provisioning.isEmpty() && runnableContainerRequests.isEmpty() && runningContainers.isEmpty() &&
-        restartingRunnables.isEmpty()) {
+      if (provisioning.isEmpty() && runnableContainerRequests.isEmpty() && runningContainers.isEmpty()) {
         LOG.info("All containers completed. Shutting down application master.");
         break;
       }
 
       // If nothing is in provisioning, and no pending request, move to next one
+      int count = runnableContainerRequests.size();
       while (provisioning.isEmpty() && currentRequest == null && !runnableContainerRequests.isEmpty()) {
         RunnableContainerRequest runnableContainerRequest = runnableContainerRequests.peek();
         if (!runnableContainerRequest.isReadyToBeProvisioned()) {
@@ -401,6 +398,11 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
           runnableContainerRequest = runnableContainerRequests.poll();
           runnableContainerRequests.add(runnableContainerRequest);
 
+          // We checked all the requests that were pending when we started this loop
+          // Any remaining requests are not ready to be provisioned
+          if (--count <= 0) {
+            break;
+          }
           continue;
         }
         currentRequest = runnableContainerRequest.takeRequest();
@@ -941,7 +943,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
         for (int instanceId : instancesToRemove) {
           LOG.debug("Stop instance {} for runnable {}", instanceId, runnableName);
           try {
-            restartingRunnables.add(runnableName + "-" + instanceId);
             runningContainers.stopByIdAndWait(runnableName, instanceId);
           } catch (Exception ex) {
             // could be thrown if the container already stopped.
@@ -955,7 +956,6 @@ public final class ApplicationMasterService extends AbstractYarnTwillService imp
         // For all runnables that needs to re-request for containers, update the expected count timestamp
         // so that the EventHandler would be triggered with the right expiration timestamp.
         expectedContainers.updateRequestTime(Collections.singleton(runnableName));
-        restartingRunnables.clear();
 
         completion.run();
       }
